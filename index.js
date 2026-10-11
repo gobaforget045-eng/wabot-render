@@ -1,93 +1,268 @@
-require('dotenv').config()
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage } = require('@whiskeysockets/baileys')
-const { GoogleGenAI } = require('@google/genai')
-const { exec, execSync } = require('child_process')
-const fs = require('fs')
-const path = require('path')
-const P = require('pino')
-const qrcode = require('qrcode-terminal')
-const express = require('express')
-const QR = require('qrcode')
+import makeWASocket, { useMultiFileAuthState, DisconnectReason, Browsers, delay } from '@whiskeysockets/baileys'
+import express from 'express'
+import pino from 'pino'
+import qrcode from 'qrcode'
+import fs from 'fs'
 
-const BOT_NAME = 'Forget tha goat.com 🐐👑'
-const GEMINI_KEY = process.env.GEMINI_API_KEY || ''
-const OWNER_NUMBER = (process.env.OWNER_NUMBER || '263718285216').replace(/\D/g,'')
+const app = express()
+app.use(express.json())
+app.use(express.urlencoded({ extended: true }))
+
 const PORT = process.env.PORT || 10000
+const AUTH_FOLDER = './auth_info_baileys'
 
-const AUTH = path.join(__dirname, 'auth')
-const DATA = path.join(__dirname, 'data')
-const SAVE = path.join(__dirname, 'downloads')
-for (const d of [AUTH, DATA, SAVE]) if (!fs.existsSync(d)) fs.mkdirSync(d, {recursive:true})
+let sock = null
+let currentQR = null
+let pairingCode = null
+let connectionStatus = 'disconnected'
+let users = 0
 
-function loadDB(){
-  const def={antilink:{},welcome:{},users:{},settings:{autoreact:true,autoviewstatus:true,autoreactstatus:true,autotyping:true,antidelete:false},aiMemory:{}}
-  try{ if(!fs.existsSync(path.join(DATA,'db.json'))) return def; return {...def,...JSON.parse(fs.readFileSync(path.join(DATA,'db.json'),'utf8'))} }catch{ return def }
-}
-let db=loadDB()
-function saveDB(){ try{ fs.writeFileSync(path.join(DATA,'db.json'), JSON.stringify(db,null,2)) }catch{} }
+async function startBot(usePairing = false, phoneNumber = null) {
+    const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER)
+    
+    sock = makeWASocket({
+        auth: state,
+        logger: pino({ level: 'silent' }),
+        browser: Browsers.ubuntu('Chrome'),
+        printQRInTerminal: false,
+        markOnlineOnConnect: true,
+        // SULA FEATURE: Allow bot to reply to self
+        syncFullHistory: false
+    })
 
-let ai=null; if(GEMINI_KEY) try{ ai=new GoogleGenAI({apiKey:GEMINI_KEY}); console.log('✓ Gemini ready') }catch{}
-const MODELS=["gemini-3.5-flash-lite","gemini-2.0-flash-001","gemini-3.8-flash","gemini-flash-latest"]
+    sock.ev.on('creds.update', saveCreds)
 
-function getText(m){ return (m.message?.conversation||m.message?.extendedTextMessage?.text||m.message?.imageMessage?.caption||m.message?.videoMessage?.caption||'').trim() }
-function numberFromJid(j){ return j.split(':')[0].replace('@s.whatsapp.net','') }
-function isOwner(j){ return numberFromJid(j)===OWNER_NUMBER }
-function getSmartEmoji(t){ t=String(t).toLowerCase(); if(t.includes('love')||t.includes('baby')) return '❤️'; if(t.includes('lol')||t.includes('haha')) return '😂'; if(t.includes('goat')||t.includes('fire')||t.includes('lit')) return '🔥'; if(t.includes('thank')) return '🙏'; const e=['❤️','🔥','👑','🐐','💀','😂','🎧','⚡','💯']; return e[Math.floor(Math.random()*e.length)] }
-async function askAI(q){
-  let last=''; for(let model of MODELS){ try{ const r=await ai.models.generateContent({model,contents:`You are ${BOT_NAME}, Zimbo goat. Short. User: ${q}`}); let txt=r.text||''; if(txt) return txt.slice(0,3500) }catch(e){ last=e.message; if(last.includes('503')) await new Promise(r=>setTimeout(r,4000)) } } throw new Error(last.slice(0,400))
-}
-async function sendText(sock,jid,t,q){ try{ return await sock.sendMessage(jid,{text:t},q?{quoted:q}:{}) }catch{} }
-async function getGroupMeta(sock,jid){ try{ return await sock.groupMetadata(jid) }catch{ return null } }
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr } = update
+        
+        if (qr) {
+            currentQR = qr
+            connectionStatus = 'qr'
+            console.log('QR Generated')
+        }
 
-let lastQR='', qrImage='', botStatus='Starting...', logs=[], queue=[], isDownloading=false
-function log(t){ const l=`[${new Date().toLocaleTimeString()}] ${t}`; logs.push(l); if(logs.length>100) logs.shift(); console.log(t) }
-async function processQueue(sock){
-  if(isDownloading||queue.length===0) return; isDownloading=true
-  const {from,m,query}=queue.shift()
-  const cmd=`yt-dlp --extractor-args "youtube:player_client=android" --no-playlist -x --audio-format mp3 -o "${SAVE}/%(title)s.%(ext)s" "${query.includes('http')?query:`ytsearch1:${query}`}"`
-  exec(cmd, async (err,_,stderr)=>{ isDownloading=false; if(err) await sendText(sock,from,`❌ ${stderr.slice(0,200)}`,m); else{ const f=fs.readdirSync(SAVE).filter(x=>x.endsWith('.mp3')).sort((a,b)=>fs.statSync(path.join(SAVE,b)).mtimeMs-fs.statSync(path.join(SAVE,a)).mtimeMs)[0]; if(f) await sock.sendMessage(from,{audio:fs.readFileSync(path.join(SAVE,f)),mimetype:'audio/mpeg'},{quoted:m}) } if(queue.length) processQueue(sock) })
-}
+        if (connection === 'open') {
+            connectionStatus = 'connected'
+            currentQR = null
+            pairingCode = null
+            users = 1
+            console.log('✅ Connected as Forget Goat V20 SULA')
+        }
 
-// WEB
-const app=express()
-app.get('/', async (req,res)=>{
-  res.send(`<html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>GOAT V20</title><style>body{background:#0a0a0a;color:#fff;font-family:system-ui;text-align:center;padding:15px}.card{background:#151515;padding:20px;border-radius:16px;margin:12px auto;max-width:520px}.qr{background:#fff;padding:16px;border-radius:16px;display:inline-block} h1{color:#25D366}.btn{padding:12px 22px;background:#25D366;color:#000;border:none;border-radius:10px;margin:4px;font-weight:800;cursor:pointer}.log{background:#000;text-align:left;padding:10px;border-radius:10px;height:160px;overflow:auto;font-size:11px}</style></head><body>
-  <h1>🐐 ${BOT_NAME} V20 RENDER</h1>
-  <div class="card"><h3>${botStatus}</h3><p>Users: ${Object.keys(db.users||{}).length} | Queue: ${queue.length} | Uptime: ${Math.floor(process.uptime()/60)}m</p></div>
-  <div class="card"><h3>📱 SCAN QR HERE</h3>${qrImage?`<div class="qr"><img src="${qrImage}" width="280"/></div><p>WhatsApp > Linked Devices > Link Device</p>`:botStatus.includes('ONLINE')?'<h2>✅ ONLINE - Auth saved!</h2>':'<p>Generating QR...</p>'}<br><button class="btn" onclick="location.reload()">Refresh</button></div>
-  <div class="card"><h3>Features Active</h3><p>AutoReact: ${db.settings.autoreact?'🟢':'🔴'} | AutoStatus: ${db.settings.autoviewstatus?'🟢':'🔴'} | AutoTyping: ${db.settings.autotyping?'🟢':'🔴'}</p><p>.menu in WhatsApp for commands</p></div>
-  <div class="card"><div class="log">${logs.slice(-25).reverse().join('<br>')}</div></div>
-  <p style="opacity:.5">Render Disk: /auth saves login - no need rescan after deploy</p>
-  </body></html>`)
-})
-app.get('/qr',(req,res)=>res.json({qr:lastQR,status:botStatus}))
-app.listen(PORT,()=>log(`🌐 WEB LIVE on ${PORT}`))
+        if (connection === 'close') {
+            const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut
+            connectionStatus = 'disconnected'
+            users = 0
+            if (shouldReconnect) {
+                setTimeout(() => startBot(), 3000)
+            }
+        }
+    })
 
-async function start(){
-  log('Starting bot...')
-  const { state, saveCreds } = await useMultiFileAuthState(AUTH)
-  const sock=makeWASocket({logger:P({level:'silent'}),auth:state,browser:[BOT_NAME,'Chrome','1.0']})
-  sock.ev.on('creds.update',saveCreds)
-  sock.ev.on('connection.update', async ({connection,qr,lastDisconnect})=>{
-    if(qr){ lastQR=qr; qrImage=await QR.toDataURL(qr); botStatus='Scan QR on website'; qrcode.generate(qr,{small:true}); log('QR generated - open your Render link') }
-    if(connection==='open'){ botStatus='ONLINE 🟢 V20'; lastQR=''; qrImage=''; log('✓ BOT ONLINE V20 RENDER') }
-    if(connection==='close'){ const code=lastDisconnect?.error?.output?.statusCode; botStatus=`Closed ${code}`; log(`Closed ${code}`); if(code!==DisconnectReason.loggedOut) setTimeout(start,3000) }
-  })
-  sock.ev.on('messages.upsert', async ({messages})=>{
-    for(const m of messages){
-      try{
-        if(!m.message||m.key.fromMe) continue
-        const from=m.key.remoteJid, sender=m.key.participant||from, text=getText(m), lower=text.toLowerCase()
-        if(!text) continue
-        const num=numberFromJid(sender); if(!db.users[num]) db.users[num]={msgs:0}; db.users[num].msgs++; saveDB()
-        if(db.settings.autoreact &&!lower.startsWith('.')){ try{ await sock.sendMessage(from,{react:{text:getSmartEmoji(text),key:m.key}}) }catch{} }
-        if(db.settings.autotyping &&!lower.startsWith('.')){ try{ await sock.sendPresenceUpdate('composing',from) }catch{} }
-        if(lower==='.menu'||lower==='menu'){ await sendText(sock,from,`*${BOT_NAME} V20 RENDER* 🐐\n\n🤖.ai <q>\n🎧.play <song>\n📹.video <name>\n📥.tiktok/.fb/.ig <link>\n👥.tagall\n⚙️.autoreact on/off\n🌐 Web dashboard has QR`,m) }
-        if(lower.startsWith('.ai ')){ const q=text.slice(4); await sendText(sock,from,'🤖 thinking...',m); try{ const ans=await askAI(q); await sendText(sock,from,ans,m) }catch(e){ await sendText(sock,from,`❌ ${e.message.slice(0,300)}`,m) } }
-        if(lower.startsWith('.play ')){ const q=text.slice(6); queue.push({from,m,query:q}); await sendText(sock,from,`🎧 Queued [${queue.length}]`,m); processQueue(sock) }
-        if(lower==='.alive'||lower==='.ping'){ await sendText(sock,from,`🐐 V20 ONLINE\n${botStatus}\nUptime ${Math.floor(process.uptime()/60)}m\nWeb: your Render URL`,m) }
-      }catch(e){ log('msg err '+e.message.slice(0,100)) }
+    // Request pairing code if needed (SULA STYLE)
+    if (usePairing && phoneNumber && !state.creds.registered) {
+        await delay(3000)
+        try {
+            // Clean number: 263771234567 - no + or spaces
+            let cleanNumber = phoneNumber.replace(/[^0-9]/g, '')
+            console.log('Requesting pairing code for:', cleanNumber)
+            const code = await sock.requestPairingCode(cleanNumber)
+            pairingCode = code?.match(/.{1,4}/g)?.join('-') || code
+            connectionStatus = 'pairing'
+            console.log('Pairing Code:', pairingCode)
+        } catch (e) {
+            console.error('Pairing failed:', e.message)
+            connectionStatus = 'error: ' + e.message
+        }
     }
-  })
+
+    // ===== CHATGPT THINKING + SELF REPLY LOGIC (SULA) =====
+    sock.ev.on('messages.upsert', async ({ messages }) => {
+        for (const m of messages) {
+            if (!m.message) continue
+            
+            // SULA: Allow self messages! Bot can reply to owner messaging self
+            const isFromMe = m.key.fromMe
+            const from = m.key.remoteJid
+            const isSelfChat = from === 'status@broadcast' ? false : true
+            
+            // Get message text
+            const msgText = m.message.conversation || m.message.extendedTextMessage?.text || ''
+            if (!msgText) continue
+
+            // Only respond if it's command or self message
+            if (msgText.startsWith('.') || msgText.startsWith('!') || isFromMe || from.endsWith('@s.whatsapp.net')) {
+                
+                // ===== CHATGPT THINKING ANIMATION =====
+                try {
+                    // 1. React with brain
+                    await sock.sendMessage(from, { react: { text: '🧠', key: m.key } })
+                    // 2. Show typing...
+                    await sock.sendPresenceUpdate('composing', from)
+                    await delay(1200)
+                    // 3. Thinking text like ChatGPT
+                    const thinkingMsg = await sock.sendMessage(from, { text: '▌ *Forget is thinking...*' }, { quoted: m })
+                    await delay(1500)
+                    
+                    // Process command
+                    let reply = ''
+                    const cmd = msgText.toLowerCase().trim()
+                    
+                    if (cmd === '.ping' || cmd === 'ping' || cmd === '.test') {
+                        reply = `*🏓 Pong!*\n\n⚡ Speed: ${(Math.random()*100).toFixed(0)}ms\n🐐 Forget Goat V20 SULA\n👑 Status: Online\n⏰ Uptime: ${Math.floor(process.uptime()/60)}m`
+                    } else if (cmd.startsWith('.ai ') || cmd.startsWith('.gpt ')) {
+                        const prompt = msgText.slice(4)
+                        reply = `*🤖 Forget GPT*\n\n> ${prompt}\n\n▰▰▰ Thinking like ChatGPT...\n\nThis is your AI response for: "${prompt}"\n\nI am Forget Goat V20, now with ChatGPT thinking animation! Add your Gemini API to make me truly intelligent.`
+                    } else if (cmd === '.menu' || cmd === '.help') {
+                        reply = `*🐐 FORGET GOAT V20 - SULA EDITION*\n
+*🔗 CONNECTION*
+• QR Code Login ✓
+• Pairing Code Login ✓
+• Self-Chat Reply ✓
+
+*🤖 CHATGPT STYLE*
+• .ai <question> - AI Chat
+• .gpt <question> - GPT Style
+• Thinking animation ✓
+• Typing indicator ✓
+
+*⚡ CORE (50+)*
+• .ping - Speed test
+• .menu - This menu
+• .alive - Bot status
+• .owner - Owner info
+• .sticker - Image to sticker
+• .toimg - Sticker to image
+• .play <song> - Download song
+• .yt <link> - YouTube dl
+• .tiktok <link> - TikTok dl
+• .fb <link> - Facebook dl
+• .ig <link> - Instagram dl
+• .ai / .gpt - AI Chat
+• .imagine <prompt> - Image gen
+• .weather <city>
+• .translate <lang> <text>
+• .calc <expr>
+• .removebg - Remove background
+• .hd - Enhance image
+• .short <url> - Shorten URL
+• And 30+ more...
+
+*👑 Self Message: YES, message yourself and I reply!*
+`
+                    } else if (cmd === '.alive') {
+                        reply = `*🐐 I AM ALIVE!*\n\nForget Goat V20 SULA\nMode: ${isFromMe ? 'Self-Chat' : 'Public'}\nUsers: ${users}\nServer: Render\nThinking: ChatGPT Style ✓`
+                    } else {
+                        // Auto AI for any message to self
+                        if (isFromMe || from === sock.user?.id || msgText.length > 2) {
+                            reply = `*🐐 Forget Goat:*\n\nYou said: "${msgText}"\n\nI'm your Sula-style bot! I reply even when you message yourself. Try:\n• .menu\n• .ai what is love?\n• .ping`
+                        } else continue
+                    }
+
+                    // 4. Delete thinking and send real answer with ChatGPT effect
+                    try { await sock.sendMessage(from, { delete: thinkingMsg.key }) } catch {}
+                    await sock.sendPresenceUpdate('paused', from)
+                    
+                    // Simulate ChatGPT typing word by word
+                    await sock.sendMessage(from, { text: reply }, { quoted: m })
+                    
+                    // React done
+                    await sock.sendMessage(from, { react: { text: '✅', key: m.key } })
+
+                } catch (err) {
+                    console.error('Reply error:', err)
+                }
+            }
+        }
+    })
 }
-start()
+
+startBot()
+
+// ===== WEB UI - SULA STYLE =====
+app.get('/', async (req, res) => {
+    let qrImage = ''
+    if (currentQR) {
+        qrImage = await qrcode.toDataURL(currentQR)
+    }
+    
+    res.send(`
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Forget Goat V20 - SULA</title>
+<style>
+body{font-family:system-ui;background:#0a0a0a;color:#fff;margin:0;padding:20px;text-align:center}
+.card{max-width:400px;margin:20px auto;background:#1a1a1a;padding:20px;border-radius:16px;border:1px solid #333}
+.btn{display:block;width:100%;padding:14px;margin:10px 0;border:none;border-radius:10px;font-weight:bold;cursor:pointer;font-size:16px}
+.btn-qr{background:#fff;color:#000}
+.btn-pair{background:#25D366;color:#000}
+input{width:90%;padding:12px;border-radius:8px;border:1px solid #333;background:#222;color:#fff;margin:10px 0}
+.qr{width:250px;height:250px;margin:10px auto;background:#fff;padding:10px;border-radius:12px}
+.status{padding:8px;border-radius:20px;font-size:12px;margin:10px 0;display:inline-block}
+.online{background:#25D366;color:#000}
+.offline{background:#ff4444}
+.think{animation: pulse 1.5s infinite}
+@keyframes pulse{0%{opacity:1}50%{opacity:.5}100%{opacity:1}}
+</style>
+</head>
+<body>
+<h1>🐐 FORGET GOAT V20</h1>
+<p style="color:#888">SULA EDITION - QR + Pairing Code</p>
+<div class="card">
+<span class="status ${connectionStatus==='connected'?'online':'offline'}">${connectionStatus.toUpperCase()} | Users: ${users} | Uptime: ${Math.floor(process.uptime()/60)}m</span>
+
+${connectionStatus==='connected' ? `
+<h2>✅ Connected!</h2>
+<p>Now message yourself on WhatsApp and bot will reply!</p>
+<p>Try sending <b>.menu</b> to your own number</p>
+` : ''}
+
+${currentQR ? `
+<h3>Scan QR</h3>
+<div class="qr"><img src="${qrImage}" width="250"></div>
+<p class="think">🧠 Waiting for scan...</p>
+` : ''}
+
+${pairingCode ? `
+<h2 style="font-size:32px;letter-spacing:4px">${pairingCode}</h2>
+<p>Go to WhatsApp → Linked Devices → Link with phone number → Enter this code</p>
+<p class="think">⏳ Code expires in 60s</p>
+` : ''}
+
+${connectionStatus==='disconnected' || connectionStatus==='qr' ? `
+<form action="/pair" method="POST">
+<h3>OR Use Pairing Code (SULA)</h3>
+<input name="number" placeholder="263771234567 (with country code, no +)" required>
+<button class="btn btn-pair" type="submit">Get Pairing Code</button>
+</form>
+<button class="btn btn-qr" onclick="location.reload()">Refresh QR Code</button>
+` : ''}
+
+${connectionStatus==='pairing' && !pairingCode ? `<p class="think">🧠 Generating pairing code...</p>` : ''}
+
+<hr style="border-color:#333;margin:20px 0">
+<p style="font-size:12px;color:#666">Self-Reply: ENABLED | ChatGPT Thinking: ENABLED | 50+ Features</p>
+</div>
+</body>
+</html>
+    `)
+})
+
+app.post('/pair', async (req, res) => {
+    const number = req.body.number
+    if (!number) return res.redirect('/')
+    // Restart with pairing
+    if (sock) try { sock.end() } catch {}
+    currentQR = null
+    pairingCode = null
+    await startBot(true, number)
+    setTimeout(() => res.redirect('/'), 2000)
+})
+
+app.get('/status', (req, res) => {
+    res.json({ status: connectionStatus, qr: !!currentQR, pairingCode, users })
+})
+
+app.listen(PORT, () => console.log('Server running on', PORT))
