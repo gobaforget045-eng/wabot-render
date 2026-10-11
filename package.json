@@ -1,8 +1,8 @@
 {
-  "name": "forget-goat-v20",
+  "name": "forget-goat-v20-sula",
   "version": "20.0.0",
   "main": "index.js",
-  "type": "commonjs",
+  "type": "module",
   "engines": {
     "node": "20.x"
   },
