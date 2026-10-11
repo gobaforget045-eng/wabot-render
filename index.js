@@ -146,7 +146,8 @@ async function startBot(usePairing = false, phoneNumber = null) {
 • .removebg - Remove background
 • .hd - Enhance image
 • .short <url> - Shorten URL
-• And 30+ more...
+• . Xhamster <name> Xhamster.com dl
+• And 40 more...
 
 *👑 Self Message: YES, message yourself and I reply!*
 `
