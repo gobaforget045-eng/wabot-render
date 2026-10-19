@@ -1,6 +1,6 @@
 {
-  "name": "forget-astra-final",
-  "version": "6.7.0",
+  "name": "forget-astra-golden-queen",
+  "version": "6.9.0",
   "type": "module",
   "main": "index.js",
   "engines": { "node": "20.x" },
