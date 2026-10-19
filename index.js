@@ -306,7 +306,7 @@ app.get('/', async (req,res)=>{
     <p class="dim">Channels ✅ Groups ✅ Private ✅ | AutoTyping ✅ AlwaysOnline ✅</p>
     ${qr?`<img class="qr" src="${img}">`:''}
     ${pair?`<div class="code">${pair}</div><p style="color:#FFD700;font-weight:700">PAIRING CODE - Expires 20s ⚡</p><script>setTimeout(()=>location.reload(),15000)</script>`:''}
-    ${!pair&&status!=='connected'?`<form method="POST" action="/pair" style="margin-top:15px"><input name="number" placeholder="Enter WhatsApp Number: 2637..." required><button class="btn" style="margin-top:12px">👑 GENERATE GOLDEN PAIR CODE 👑</button></form><p class="dim" style="margin-top:10px">Or use in WhatsApp: .pair 2637... / .qrcode 2637...</p>`:''}
+    ${!pair&&status!=='connected'?`<form method="POST" action="/pair" style="margin-top:15px"><input type="tel" name="number" inputmode="numeric" pattern="[0-9+ ]*" placeholder="263771234567 or +26377..." required autocomplete="tel" style="width:92%;padding:14px;border-radius:10px;background:#000;color:#FFD700;border:1px solid #FFD700;text-align:center;font-size:16px"><button class="btn" style="margin-top:12px">👑 GENERATE GOLDEN PAIR CODE 👑</button></form><p class="dim" style="margin-top:10px">Or use in WhatsApp: .pair 2637... / .qrcode 2637...</p>`:''}
     ${status==='connected'?'<h2 style="color:#FFD700">✅ LINKED - GOLDEN QUEEN ACTIVE</h2><p class="dim">Type .menu in WhatsApp</p>':''}
     <div class="footer-brand">💩 I'M FORGET ASTRA GPT💵
 CREATED BY GOAT🐐
